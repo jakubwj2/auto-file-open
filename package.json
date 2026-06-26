@@ -1,0 +1,71 @@
+{
+  "name": "content-locale-pair",
+  "displayName": "Content Locale Pair",
+  "description": "Opens the matching locale content file in a split editor",
+  "version": "0.0.4",
+  "publisher": "portfolio",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./build/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "mkdir -p out && vsce package --allow-missing-repository --out out/content-locale-pair-$npm_package_version.vsix",
+    "build": "npm run compile && npm run package",
+    "install": "npm run build && cursor --install-extension out/content-locale-pair-0.0.4.vsix && cursor --reload"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.4.2",
+    "typescript": "^5.8.3"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Content Locale Pair",
+      "properties": {
+        "contentLocalePair.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open the paired locale file in a split editor"
+        },
+        "contentLocalePair.contentRoot": {
+          "type": "string",
+          "default": "src/content",
+          "description": "Path to the content folder containing locale subfolders (e.g. src/content)"
+        },
+        "contentLocalePair.locales": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "en",
+            "cs"
+          ],
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "The two locale folder names to pair in a split editor"
+        },
+        "contentLocalePair.leftLocale": {
+          "type": "string",
+          "default": "en",
+          "description": "Locale shown in the left editor column when a content pair is opened"
+        },
+        "contentLocalePair.closePairOnClose": {
+          "type": "boolean",
+          "default": true,
+          "description": "Close the paired locale file when one side of the pair is closed"
+        }
+      }
+    }
+  }
+}

@@ -10,9 +10,6 @@ interface GroupConfig {
 
 type TemplatePart = { kind: "literal"; value: string } | { kind: "capture" };
 
-/** Prevents a recursive close when we close the counterpart tab programmatically. */
-const suppressClosePair = new Set<string>();
-
 /** Prevents re-entry while a split layout is being arranged. */
 let arranging = false;
 
@@ -163,33 +160,11 @@ function buildGroupRelativePath(
   }
 
   return buildPathFromTemplate(template, [groupRelativeStem]);
-
-}
-
-/**
- * Matches a file against configured groups and returns each group's paired path.
- * All group regexes must expose the same number of capture groups.
- */
-function resolvePairPaths(
-  fsPath: string,
-  groups: readonly GroupConfig[],
-): Map<number, string> | null {
-  void fsPath;
-  void groups;
-  return null;
-}
-
-/** Returns true when the given file is already open in the specified editor column. */
-function inColumn(fsPath: string, column: vscode.ViewColumn): boolean {
-  return vscode.window.visibleTextEditors.some(
-    (editor) =>
-      editor.document.uri.fsPath === fsPath && editor.viewColumn === column,
-  );
 }
 
 function hasViewColumn(column: vscode.ViewColumn): boolean {
   return vscode.window.visibleTextEditors.some(
-    (group) => group.viewColumn === column,
+    (editor) => editor.viewColumn === column,
   );
 }
 
@@ -199,21 +174,12 @@ function resolveOpenViewColumn(targetColumn: vscode.ViewColumn): vscode.ViewColu
     return targetColumn;
   }
 
-  // ViewColumn numbers only map reliably once lower groups exist; Beside creates a split.
   if (targetColumn > vscode.ViewColumn.One) {
     return vscode.ViewColumn.Beside;
   }
 
   return targetColumn;
 }
-
-function printGroupTree() {
-  for (const group of vscode.window.tabGroups.all) {
-    const tabs = group.tabs.map((tab) => tab.input instanceof vscode.TabInputText ? tab.input.uri.fsPath : null).filter((path): path is string => path !== null);
-    console.log("group", group.viewColumn, tabs);
-  }
-}
-
 
 /**
  * Opens a file in the requested column, creating an empty file first if needed.
@@ -239,24 +205,9 @@ async function openInColumn(
   });
 }
 
-/** Returns true when every paired file is open in its configured view group. */
-function isLayoutCorrect(
-  paths: ReadonlyMap<number, string>,
-  groups: readonly GroupConfig[],
-): boolean {
-  return groups.every((group) => {
-    const filePath = paths.get(group.viewGroupId);
-    return (
-      filePath !== undefined &&
-      inColumn(filePath, group.viewGroupId as vscode.ViewColumn)
-    );
-  });
-}
-
 /**
  * When the active editor matches a configured group, opens the paired files in
- * their view groups. Skips work when the layout is already correct or the
- * extension is disabled.
+ * their view groups.
  */
 async function openCorrespondingFiles(editor: vscode.TextEditor | undefined): Promise<void> {
   const { enabled, groups } = settings();
@@ -265,55 +216,47 @@ async function openCorrespondingFiles(editor: vscode.TextEditor | undefined): Pr
     return;
   }
 
-  const focusedAbsolutePath = editor.document.uri.fsPath;
-  const focusedWorkspaceRelativePath = vscode.workspace.asRelativePath(focusedAbsolutePath);
-
-  const correspondingFiles = getCorrespondingFiles(focusedWorkspaceRelativePath, configuredGroups, editor);
-
-  // if the file doesn't match any group, don't do anything
+  const focusedWorkspaceRelativePath = vscode.workspace.asRelativePath(
+    editor.document.uri.fsPath,
+  );
+  const correspondingFiles = getCorrespondingFiles(
+    focusedWorkspaceRelativePath,
+    configuredGroups,
+    editor,
+  );
   if (correspondingFiles.length === 0) {
     return;
   }
 
-
   arranging = true;
   try {
     for (const { absoluteFilePath, group } of correspondingFiles) {
-      // check if the file is already open elsewhere
       for (const tabGroup of vscode.window.tabGroups.all) {
-        // check if the file is already open in the current group
-        let found = false
+        let found = false;
         for (const tab of tabGroup.tabs) {
-          // if the tab is not a text tab, skip it
           if (!(tab.input instanceof vscode.TabInputText)) {
             continue;
           }
 
-          if (tab.input.uri.fsPath === absoluteFilePath) {
-            // if the tab is open in the correct group, look for it in the other groups
-            if (tabGroup.viewColumn === group.viewGroupId as vscode.ViewColumn) {
-              found = true;
-              break;
-            }
-            // if the tab is open in the wrong group, close it
-
-            console.log("closing tab", tab.input.uri.fsPath, "in group", tabGroup.viewColumn);
-            void vscode.window.tabGroups.close(tab);
+          if (tab.input.uri.fsPath !== absoluteFilePath) {
+            continue;
           }
+
+          if (tabGroup.viewColumn === group.viewGroupId as vscode.ViewColumn) {
+            found = true;
+            break;
+          }
+          console.log("closing tab", tab.input.uri.fsPath, "in group", tabGroup.viewColumn);
+          await vscode.window.tabGroups.close(tab);
         }
 
-        // if the file is not open in the correct group, open it
         if (!found && tabGroup.viewColumn === group.viewGroupId as vscode.ViewColumn) {
           console.log("opening tab", absoluteFilePath, "in group", group.viewGroupId);
-          void openInColumn(absoluteFilePath, group.viewGroupId as vscode.ViewColumn, false);
+          await openInColumn(absoluteFilePath, group.viewGroupId as vscode.ViewColumn, false);
         }
       }
     }
-  }
-  catch (error) {
-    console.error("error opening corresponding files", error);
-  }
-  finally {
+  } finally {
     arranging = false;
   }
 }
@@ -346,34 +289,38 @@ function getGroupRelativeStem(workspaceRelativePath: string, group: GroupConfig)
   return new RegExp(group.fileRegex).exec(groupRelativePath)?.[1];
 }
 
-function getCorrespondingFiles(workspaceRelativePath: string, groups: readonly GroupConfig[], editor: vscode.TextEditor): { group: GroupConfig; absoluteFilePath: string }[] {
-  const fileGroupId = getPathGroupId(workspaceRelativePath, groups);
-  if (!fileGroupId) {
+function getCorrespondingFiles(
+  workspaceRelativePath: string,
+  groups: readonly GroupConfig[],
+  editor: vscode.TextEditor,
+): { group: GroupConfig; absoluteFilePath: string }[] {
+  const fileGroup = getPathGroupId(workspaceRelativePath, groups);
+  if (!fileGroup) {
     return [];
   }
 
-  const groupRelativeStem = getGroupRelativeStem(workspaceRelativePath, fileGroupId);
+  const groupRelativeStem = getGroupRelativeStem(workspaceRelativePath, fileGroup);
   if (!groupRelativeStem) {
     return [];
   }
 
   const correspondingFiles: { group: GroupConfig; absoluteFilePath: string }[] = [];
   for (const group of groups) {
-    // if (group.viewGroupId === fileGroupId.viewGroupId) {
-    //   continue;
-    // }
     const counterpartRelativePath = buildGroupRelativePath(group.fileRegex, groupRelativeStem);
     if (!counterpartRelativePath) {
       continue;
     }
 
     const counterpartWorkspaceRelativePath = `${group.rootFolder}${counterpartRelativePath}`;
-    const absoluteFilePath = workspaceRelativeToFsPath(counterpartWorkspaceRelativePath, editor);
+    const absoluteFilePath = workspaceRelativeToFsPath(
+      counterpartWorkspaceRelativePath,
+      editor,
+    );
     if (!absoluteFilePath) {
       continue;
     }
 
-    correspondingFiles.push({ "group": group, "absoluteFilePath": absoluteFilePath });
+    correspondingFiles.push({ group, absoluteFilePath });
   }
   return correspondingFiles;
 }
@@ -393,48 +340,46 @@ function workspaceRelativeToFsPath(
 
 /**
  * Closes paired tabs in other view groups when one side of the pair is closed,
- * unless `closePairOnClose` is disabled or the close was triggered by us.
+ * unless `closePairOnClose` is disabled.
  */
 async function closeCounterpart(closedPath: string): Promise<void> {
   const { enabled, groups, closePairOnClose } = settings();
   const configuredGroups = validGroups(groups);
-  if (
-    !enabled ||
-    arranging ||
-    !closePairOnClose ||
-    !configuredGroups ||
-    suppressClosePair.has(closedPath)
-  ) {
+  if (!enabled || arranging || !closePairOnClose || !configuredGroups) {
     return;
   }
 
-  const closedFileWorkspaceRelativePath = vscode.workspace.asRelativePath(closedPath);
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     return;
   }
 
-  const correspondingFiles = getCorrespondingFiles(closedFileWorkspaceRelativePath, configuredGroups, editor);
-
+  const closedFileWorkspaceRelativePath = vscode.workspace.asRelativePath(closedPath);
+  const correspondingFiles = getCorrespondingFiles(
+    closedFileWorkspaceRelativePath,
+    configuredGroups,
+    editor,
+  );
   if (correspondingFiles.length === 0) {
     return;
   }
 
-
   arranging = true;
   try {
-    for (const { absoluteFilePath, group } of correspondingFiles) {
+    for (const { absoluteFilePath } of correspondingFiles) {
       for (const tabGroup of vscode.window.tabGroups.all) {
         for (const tab of tabGroup.tabs) {
-          if (tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === absoluteFilePath) {
+          if (
+            tab.input instanceof vscode.TabInputText &&
+            tab.input.uri.fsPath === absoluteFilePath
+          ) {
             console.log("closing tab", tab.input.uri.fsPath, "in group", tabGroup.viewColumn);
-            void vscode.window.tabGroups.close(tab);
+            await vscode.window.tabGroups.close(tab);
           }
         }
       }
     }
-  }
-  finally {
+  } finally {
     arranging = false;
   }
 }

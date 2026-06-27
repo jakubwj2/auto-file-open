@@ -2,7 +2,7 @@
   "name": "content-locale-pair",
   "displayName": "Content Locale Pair",
   "description": "Opens the matching locale content file in a split editor",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "publisher": "portfolio",
   "engines": {
     "vscode": "^1.75.0"
@@ -35,30 +35,49 @@
         "contentLocalePair.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically open the paired locale file in a split editor"
+          "description": "Automatically open paired files in a split editor"
         },
-        "contentLocalePair.contentRoot": {
-          "type": "string",
-          "default": "src/content",
-          "description": "Path to the content folder containing locale subfolders (e.g. src/content)"
-        },
-        "contentLocalePair.locales": {
+        "contentLocalePair.groups": {
           "type": "array",
+          "minItems": 2,
+          "description": "Editor view groups used to match and pair files. Requires at least two groups.",
           "items": {
-            "type": "string"
+            "type": "object",
+            "required": [
+              "viewGroupId",
+              "rootFolder",
+              "fileRegex"
+            ],
+            "properties": {
+              "viewGroupId": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Target editor column (ViewColumn number, e.g. 1 = left, 2 = right)"
+              },
+              "rootFolder": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Root folder for this group, relative to the workspace (e.g. test/en)"
+              },
+              "fileRegex": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Regex matched against the file path relative to rootFolder"
+              }
+            }
           },
           "default": [
-            "en",
-            "cs"
-          ],
-          "minItems": 2,
-          "maxItems": 2,
-          "description": "The two locale folder names to pair in a split editor"
-        },
-        "contentLocalePair.leftLocale": {
-          "type": "string",
-          "default": "en",
-          "description": "Locale shown in the left editor column when a content pair is opened"
+            {
+              "viewGroupId": 1,
+              "rootFolder": "src/content/en",
+              "fileRegex": ".+"
+            },
+            {
+              "viewGroupId": 2,
+              "rootFolder": "src/content/cs",
+              "fileRegex": ".+"
+            }
+          ]
         },
         "contentLocalePair.closePairOnClose": {
           "type": "boolean",

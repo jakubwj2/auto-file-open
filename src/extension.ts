@@ -1,7 +1,14 @@
-import * as path from "node:path";
 import * as vscode from "vscode";
 
 const CONFIG = "contentLocalePair";
+
+interface GroupConfig {
+  viewGroupId: number;
+  rootFolder: string;
+  fileRegex: string;
+}
+
+type TemplatePart = { kind: "literal"; value: string } | { kind: "capture" };
 
 /** Prevents a recursive close when we close the counterpart tab programmatically. */
 const suppressClosePair = new Set<string>();
@@ -14,58 +21,161 @@ function settings() {
   const config = vscode.workspace.getConfiguration(CONFIG);
   return {
     enabled: config.get<boolean>("enabled", true),
-    contentRoot: config.get<string>("contentRoot", "src/content"),
-    locales: config.get<string[]>("locales", ["en", "cs"]),
-    leftLocale: config.get<string>("leftLocale", "en"),
+    groups: config.get<GroupConfig[]>("groups", []),
     closePairOnClose: config.get<boolean>("closePairOnClose", true),
   };
 }
 
-/**
- * Checks whether a file path belongs to a configured locale pair.
- * Returns both locale paths and the counterpart path, or null if the file
- * is not under `contentRoot/<locale>/...`.
- */
-function parseLocaleFile(
-  fsPath: string,
-  contentRoot: string,
-  locales: readonly string[],
-) {
-  if (locales.length !== 2) {
+/** Returns valid group configs, or null when fewer than two groups are configured. */
+function validGroups(groups: readonly GroupConfig[]): GroupConfig[] | null {
+  if (groups.length < 2) {
     return null;
   }
 
-  const parts = fsPath.split(/[/\\]/);
-  const rootParts = contentRoot.split(/[/\\]/).filter(Boolean);
-  if (rootParts.length === 0) {
-    return null;
-  }
+  const parsed: GroupConfig[] = [];
+  const viewGroupIds = new Set<number>();
 
-  for (let i = 0; i <= parts.length - rootParts.length - 2; i++) {
-    if (!rootParts.every((segment, index) => parts[i + index] === segment)) {
-      continue;
-    }
-
-    const localeIndex = i + rootParts.length;
-    const locale = parts[localeIndex];
-    if (!locales.includes(locale)) {
+  for (const group of groups) {
+    if (
+      !Number.isInteger(group.viewGroupId) ||
+      group.viewGroupId < 1 ||
+      typeof group.rootFolder !== "string" ||
+      group.rootFolder.trim().length === 0 ||
+      typeof group.fileRegex !== "string" ||
+      group.fileRegex === undefined
+    ) {
       return null;
     }
 
-    const otherLocale = locales[0] === locale ? locales[1] : locales[0];
-    const prefix = parts.slice(0, localeIndex).join(path.sep);
-    const rest = parts.slice(localeIndex + 1).join(path.sep);
-    const counterpart = path.join(prefix, otherLocale, rest);
+    if (viewGroupIds.has(group.viewGroupId)) {
+      return null;
+    }
 
-    return {
-      paths: {
-        [locale]: fsPath,
-        [otherLocale]: counterpart,
-      },
-      counterpart,
-    };
+    try {
+      new RegExp(group.fileRegex);
+    } catch {
+      return null;
+    }
+
+    viewGroupIds.add(group.viewGroupId);
+    parsed.push({
+      viewGroupId: group.viewGroupId,
+      rootFolder: group.rootFolder.trim(),
+      fileRegex: group.fileRegex,
+    });
   }
 
+  return parsed;
+}
+
+/** Splits a path regex into literal segments and capture-group placeholders. */
+function decomposePathRegex(pathRegex: string): TemplatePart[] | null {
+  const source = pathRegex.replace(/^\^/, "").replace(/\$$/, "");
+  const parts: TemplatePart[] = [];
+  let literal = "";
+  let i = 0;
+
+  while (i < source.length) {
+    if (source[i] === "\\") {
+      if (i + 1 >= source.length) {
+        return null;
+      }
+      literal += source[i + 1];
+      i += 2;
+      continue;
+    }
+
+    if (source[i] !== "(") {
+      literal += source[i];
+      i++;
+      continue;
+    }
+
+    if (literal) {
+      parts.push({ kind: "literal", value: literal });
+      literal = "";
+    }
+
+    if (source.slice(i, i + 3) === "(?:") {
+      return null;
+    }
+
+    if (source.slice(i, i + 3) === "(?<") {
+      const closeAngle = source.indexOf(">", i);
+      if (closeAngle === -1) {
+        return null;
+      }
+      i = closeAngle + 1;
+    } else {
+      i++;
+    }
+
+    parts.push({ kind: "capture" });
+
+    let depth = 1;
+    while (i < source.length && depth > 0) {
+      if (source[i] === "(") {
+        depth++;
+      }
+      if (source[i] === ")") {
+        depth--;
+      }
+      i++;
+    }
+  }
+
+  if (literal) {
+    parts.push({ kind: "literal", value: literal });
+  }
+
+  return parts.some((part) => part.kind === "capture") ? parts : null;
+}
+
+/** Rebuilds a file path from a template and captured regex groups. */
+function buildPathFromTemplate(
+  parts: readonly TemplatePart[],
+  captures: readonly string[],
+): string {
+  let path = "";
+  let captureIndex = 0;
+
+  for (const part of parts) {
+    if (part.kind === "literal") {
+      path += part.value;
+      continue;
+    }
+
+    path += captures[captureIndex] ?? "";
+    captureIndex++;
+  }
+
+  return path;
+}
+
+/** Rebuilds a group-relative file path by substituting a stem into the fileRegex capture groups. */
+function buildGroupRelativePath(
+  fileRegex: string,
+  groupRelativeStem: string,
+): string | null {
+  const template = decomposePathRegex(fileRegex);
+  if (!template) {
+    return null;
+  }
+
+  return buildPathFromTemplate(template, [groupRelativeStem]);
+
+}
+
+/**
+ * Matches a file against configured groups and returns each group's paired path.
+ * All group regexes must expose the same number of capture groups.
+ */
+function resolvePairPaths(
+  fsPath: string,
+  groups: readonly GroupConfig[],
+): Map<number, string> | null {
+  void fsPath;
+  void groups;
   return null;
 }
 
@@ -76,6 +186,34 @@ function inColumn(fsPath: string, column: vscode.ViewColumn): boolean {
       editor.document.uri.fsPath === fsPath && editor.viewColumn === column,
   );
 }
+
+function hasViewColumn(column: vscode.ViewColumn): boolean {
+  return vscode.window.visibleTextEditors.some(
+    (group) => group.viewColumn === column,
+  );
+}
+
+/** Picks a view column that opens in the intended group, creating a split if needed. */
+function resolveOpenViewColumn(targetColumn: vscode.ViewColumn): vscode.ViewColumn {
+  if (hasViewColumn(targetColumn)) {
+    return targetColumn;
+  }
+
+  // ViewColumn numbers only map reliably once lower groups exist; Beside creates a split.
+  if (targetColumn > vscode.ViewColumn.One) {
+    return vscode.ViewColumn.Beside;
+  }
+
+  return targetColumn;
+}
+
+function printGroupTree() {
+  for (const group of vscode.window.tabGroups.all) {
+    const tabs = group.tabs.map((tab) => tab.input instanceof vscode.TabInputText ? tab.input.uri.fsPath : null).filter((path): path is string => path !== null);
+    console.log("group", group.viewColumn, tabs);
+  }
+}
+
 
 /**
  * Opens a file in the requested column, creating an empty file first if needed.
@@ -95,88 +233,209 @@ async function openInColumn(
 
   const document = await vscode.workspace.openTextDocument(uri);
   await vscode.window.showTextDocument(document, {
-    viewColumn: column,
+    viewColumn: resolveOpenViewColumn(column),
     preserveFocus: !focus,
     preview: false,
   });
 }
 
+/** Returns true when every paired file is open in its configured view group. */
+function isLayoutCorrect(
+  paths: ReadonlyMap<number, string>,
+  groups: readonly GroupConfig[],
+): boolean {
+  return groups.every((group) => {
+    const filePath = paths.get(group.viewGroupId);
+    return (
+      filePath !== undefined &&
+      inColumn(filePath, group.viewGroupId as vscode.ViewColumn)
+    );
+  });
+}
+
 /**
- * When the active editor is a locale file, opens its pair in a two-column split.
- * Respects `leftLocale` for column placement and skips work when the layout
- * is already correct or the extension is disabled.
+ * When the active editor matches a configured group, opens the paired files in
+ * their view groups. Skips work when the layout is already correct or the
+ * extension is disabled.
  */
-async function maybeOpenPair(editor: vscode.TextEditor | undefined): Promise<void> {
-  const { enabled, contentRoot, locales, leftLocale } = settings();
-  if (!enabled || !editor || arranging || !locales.includes(leftLocale)) {
+async function openCorrespondingFiles(editor: vscode.TextEditor | undefined): Promise<void> {
+  const { enabled, groups } = settings();
+  const configuredGroups = validGroups(groups);
+  if (!enabled || !editor || arranging || !configuredGroups) {
     return;
   }
 
-  const parsed = parseLocaleFile(
-    editor.document.uri.fsPath,
-    contentRoot,
-    locales,
-  );
-  if (!parsed) {
+  const focusedAbsolutePath = editor.document.uri.fsPath;
+  const focusedWorkspaceRelativePath = vscode.workspace.asRelativePath(focusedAbsolutePath);
+
+  const correspondingFiles = getCorrespondingFiles(focusedWorkspaceRelativePath, configuredGroups, editor);
+
+  // if the file doesn't match any group, don't do anything
+  if (correspondingFiles.length === 0) {
     return;
   }
 
-  const rightLocale = locales.find((locale) => locale !== leftLocale);
-  if (!rightLocale) {
-    return;
-  }
-
-  const left = parsed.paths[leftLocale];
-  const right = parsed.paths[rightLocale];
-  const source = editor.document.uri.fsPath;
-
-  if (
-    inColumn(left, vscode.ViewColumn.One) &&
-    inColumn(right, vscode.ViewColumn.Two)
-  ) {
-    return;
-  }
 
   arranging = true;
   try {
-    await openInColumn(left, vscode.ViewColumn.One, source === left);
-    await openInColumn(right, vscode.ViewColumn.Two, source === right);
-  } finally {
+    for (const { absoluteFilePath, group } of correspondingFiles) {
+      // check if the file is already open elsewhere
+      for (const tabGroup of vscode.window.tabGroups.all) {
+        // check if the file is already open in the current group
+        let found = false
+        for (const tab of tabGroup.tabs) {
+          // if the tab is not a text tab, skip it
+          if (!(tab.input instanceof vscode.TabInputText)) {
+            continue;
+          }
+
+          if (tab.input.uri.fsPath === absoluteFilePath) {
+            // if the tab is open in the correct group, look for it in the other groups
+            if (tabGroup.viewColumn === group.viewGroupId as vscode.ViewColumn) {
+              found = true;
+              break;
+            }
+            // if the tab is open in the wrong group, close it
+
+            console.log("closing tab", tab.input.uri.fsPath, "in group", tabGroup.viewColumn);
+            void vscode.window.tabGroups.close(tab);
+          }
+        }
+
+        // if the file is not open in the correct group, open it
+        if (!found && tabGroup.viewColumn === group.viewGroupId as vscode.ViewColumn) {
+          console.log("opening tab", absoluteFilePath, "in group", group.viewGroupId);
+          void openInColumn(absoluteFilePath, group.viewGroupId as vscode.ViewColumn, false);
+        }
+      }
+    }
+  }
+  catch (error) {
+    console.error("error opening corresponding files", error);
+  }
+  finally {
     arranging = false;
   }
 }
 
+function isPathInGroup(relativePath: string, group: GroupConfig): boolean {
+  if (!relativePath.startsWith(group.rootFolder)) {
+    return false;
+  }
+
+  const groupRelativePath = relativePath
+    .slice(group.rootFolder.length)
+    .replace(/^[/\\]/, "");
+
+  return new RegExp(group.fileRegex).test(groupRelativePath);
+}
+
+function getPathGroupId(relativePath: string, groups: readonly GroupConfig[]): GroupConfig | undefined {
+  for (const group of groups) {
+    if (isPathInGroup(relativePath, group)) {
+      return group;
+    }
+  }
+  return undefined;
+}
+
+function getGroupRelativeStem(workspaceRelativePath: string, group: GroupConfig): string | undefined {
+  const groupRelativePath = workspaceRelativePath
+    .slice(group.rootFolder.length)
+    .replace(/^[/\\]/, "");
+  return new RegExp(group.fileRegex).exec(groupRelativePath)?.[1];
+}
+
+function getCorrespondingFiles(workspaceRelativePath: string, groups: readonly GroupConfig[], editor: vscode.TextEditor): { group: GroupConfig; absoluteFilePath: string }[] {
+  const fileGroupId = getPathGroupId(workspaceRelativePath, groups);
+  if (!fileGroupId) {
+    return [];
+  }
+
+  const groupRelativeStem = getGroupRelativeStem(workspaceRelativePath, fileGroupId);
+  if (!groupRelativeStem) {
+    return [];
+  }
+
+  const correspondingFiles: { group: GroupConfig; absoluteFilePath: string }[] = [];
+  for (const group of groups) {
+    // if (group.viewGroupId === fileGroupId.viewGroupId) {
+    //   continue;
+    // }
+    const counterpartRelativePath = buildGroupRelativePath(group.fileRegex, groupRelativeStem);
+    if (!counterpartRelativePath) {
+      continue;
+    }
+
+    const counterpartWorkspaceRelativePath = `${group.rootFolder}${counterpartRelativePath}`;
+    const absoluteFilePath = workspaceRelativeToFsPath(counterpartWorkspaceRelativePath, editor);
+    if (!absoluteFilePath) {
+      continue;
+    }
+
+    correspondingFiles.push({ "group": group, "absoluteFilePath": absoluteFilePath });
+  }
+  return correspondingFiles;
+}
+
+function workspaceRelativeToFsPath(
+  workspaceRelativePath: string,
+  editor: vscode.TextEditor,
+): string | undefined {
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+  if (!workspaceFolder) {
+    return undefined;
+  }
+
+  const segments = workspaceRelativePath.split(/[/\\]/).filter(Boolean);
+  return vscode.Uri.joinPath(workspaceFolder.uri, ...segments).fsPath;
+}
+
 /**
- * Closes the paired locale tab when one side of the pair is closed,
+ * Closes paired tabs in other view groups when one side of the pair is closed,
  * unless `closePairOnClose` is disabled or the close was triggered by us.
  */
 async function closeCounterpart(closedPath: string): Promise<void> {
-  const { closePairOnClose, contentRoot, locales } = settings();
-  if (!closePairOnClose || suppressClosePair.has(closedPath)) {
+  const { enabled, groups, closePairOnClose } = settings();
+  const configuredGroups = validGroups(groups);
+  if (
+    !enabled ||
+    arranging ||
+    !closePairOnClose ||
+    !configuredGroups ||
+    suppressClosePair.has(closedPath)
+  ) {
     return;
   }
 
-  const parsed = parseLocaleFile(closedPath, contentRoot, locales);
-  if (!parsed) {
+  const closedFileWorkspaceRelativePath = vscode.workspace.asRelativePath(closedPath);
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
     return;
   }
 
-  const tab = vscode.window.tabGroups.all
-    .flatMap((group) => group.tabs)
-    .find(
-      (tab) =>
-        tab.input instanceof vscode.TabInputText &&
-        tab.input.uri.fsPath === parsed.counterpart,
-    );
-  if (!tab) {
+  const correspondingFiles = getCorrespondingFiles(closedFileWorkspaceRelativePath, configuredGroups, editor);
+
+  if (correspondingFiles.length === 0) {
     return;
   }
 
-  suppressClosePair.add(parsed.counterpart);
+
+  arranging = true;
   try {
-    await vscode.window.tabGroups.close(tab);
-  } finally {
-    suppressClosePair.delete(parsed.counterpart);
+    for (const { absoluteFilePath, group } of correspondingFiles) {
+      for (const tabGroup of vscode.window.tabGroups.all) {
+        for (const tab of tabGroup.tabs) {
+          if (tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === absoluteFilePath) {
+            console.log("closing tab", tab.input.uri.fsPath, "in group", tabGroup.viewColumn);
+            void vscode.window.tabGroups.close(tab);
+          }
+        }
+      }
+    }
+  }
+  finally {
+    arranging = false;
   }
 }
 
@@ -184,14 +443,19 @@ async function closeCounterpart(closedPath: string): Promise<void> {
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
-      void maybeOpenPair(editor);
+      void openCorrespondingFiles(editor);
     }),
-    vscode.workspace.onDidCloseTextDocument((document) => {
-      void closeCounterpart(document.uri.fsPath);
+    vscode.window.tabGroups.onDidChangeTabs((event) => {
+      for (const tab of event.closed) {
+        if (!(tab.input instanceof vscode.TabInputText)) {
+          continue;
+        }
+        void closeCounterpart(tab.input.uri.fsPath);
+      }
     }),
   );
 
-  void maybeOpenPair(vscode.window.activeTextEditor);
+  void openCorrespondingFiles(vscode.window.activeTextEditor);
 }
 
 export function deactivate(): void { }
